@@ -14,6 +14,7 @@ from ops_proxy import __version__
 from ops_proxy.config import Config
 from ops_proxy.http_client import HTTPClient, Request, Response
 from ops_proxy.rules import RulesEngine
+from ops_proxy.telegram import TelegramLongPoller
 from ops_proxy.watcher import FileWatcher
 
 
@@ -28,6 +29,7 @@ class OpsProxyDaemon:
         self.rules = RulesEngine(self.config)
         self.http_client = HTTPClient(self.config, self.rules)
         self.watcher: FileWatcher | None = None
+        self.poller: TelegramLongPoller | None = None
         self._running = False
 
     def _setup_logging(self) -> None:
@@ -147,6 +149,7 @@ class OpsProxyDaemon:
         logger.info(f"Data directory: {self.config.data_dir}")
         logger.info(f"Requests file: {self.config.requests_file}")
         logger.info(f"Responses file: {self.config.responses_file}")
+        logger.info(f"New messages file: {self.config.new_messages_file}")
 
         # Check for bot token
         if not self.config.bot_token:
@@ -160,19 +163,37 @@ class OpsProxyDaemon:
         if not self.config.responses_file.exists():
             with open(self.config.responses_file, "w") as f:
                 json.dump({"responses": {}}, f)
+        if not self.config.new_messages_file.exists():
+            with open(self.config.new_messages_file, "w") as f:
+                json.dump({"messages": []}, f)
 
-        # Start file watcher
+        # Start file watcher for outgoing requests
         self.watcher = FileWatcher(
             self.config.requests_file,
             self._handle_file_change,
         )
         self.watcher.start()
 
+        # Start Telegram long polling for incoming messages
+        if self.config.bot_token:
+            self.poller = TelegramLongPoller(
+                bot_token=self.config.bot_token,
+                messages_file=self.config.new_messages_file,
+                timeout=30,
+            )
+            self.poller.start()
+            logger.info("Started Telegram long polling")
+        else:
+            logger.warning("No bot token - long polling disabled")
+
         self._running = True
 
         # Run loop
         try:
             while self._running:
+                # Poll for new Telegram messages
+                if self.poller:
+                    self.poller.poll()
                 time.sleep(1)
         except KeyboardInterrupt:
             logger.info("Received interrupt signal")
@@ -185,6 +206,9 @@ class OpsProxyDaemon:
         self._running = False
         if self.watcher:
             self.watcher.stop()
+        if self.poller:
+            self.poller.stop()
+            self.poller.close()
         self.http_client.close()
 
 

@@ -11,6 +11,7 @@ DEFAULT_DATA_DIR = Path.home() / ".openclaw-ops" / "ops-proxy"
 DEFAULT_CONFIG_FILE = "config.yaml"
 DEFAULT_REQUESTS_FILE = "requests.json"
 DEFAULT_RESPONSES_FILE = "responses.json"
+DEFAULT_NEW_MESSAGES_FILE = "new_messages.json"
 DEFAULT_LOG_FILE = "ops-proxy.log"
 DEFAULT_PID_FILE = "ops-proxy.pid"
 
@@ -25,6 +26,7 @@ class Config:
         self.config_file = self.data_dir / DEFAULT_CONFIG_FILE
         self.requests_file = self.data_dir / DEFAULT_REQUESTS_FILE
         self.responses_file = self.data_dir / DEFAULT_RESPONSES_FILE
+        self.new_messages_file = self.data_dir / DEFAULT_NEW_MESSAGES_FILE
         self.log_file = self.data_dir / DEFAULT_LOG_FILE
         self.pid_file = self.data_dir / DEFAULT_PID_FILE
 
