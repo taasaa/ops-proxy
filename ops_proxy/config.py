@@ -11,9 +11,10 @@ DEFAULT_DATA_DIR = Path.home() / ".openclaw-ops" / "ops-proxy"
 DEFAULT_CONFIG_FILE = "config.yaml"
 DEFAULT_REQUESTS_FILE = "requests.json"
 DEFAULT_RESPONSES_FILE = "responses.json"
-DEFAULT_NEW_MESSAGES_FILE = "new_messages.json"
+DEFAULT_INBOX_FILE = "inbox.json"
 DEFAULT_LOG_FILE = "ops-proxy.log"
 DEFAULT_PID_FILE = "ops-proxy.pid"
+DEFAULT_LOCK_FILE = "ops-proxy.lock"
 
 
 class Config:
@@ -26,9 +27,10 @@ class Config:
         self.config_file = self.data_dir / DEFAULT_CONFIG_FILE
         self.requests_file = self.data_dir / DEFAULT_REQUESTS_FILE
         self.responses_file = self.data_dir / DEFAULT_RESPONSES_FILE
-        self.new_messages_file = self.data_dir / DEFAULT_NEW_MESSAGES_FILE
+        self.inbox_file = self.data_dir / DEFAULT_INBOX_FILE
         self.log_file = self.data_dir / DEFAULT_LOG_FILE
         self.pid_file = self.data_dir / DEFAULT_PID_FILE
+        self.lock_file = self.data_dir / DEFAULT_LOCK_FILE
 
         self._config: dict[str, Any] = {}
         self._load()
@@ -52,11 +54,12 @@ class Config:
         return {
             "version": "1.0",
             "token_env": "TG_BOT_TOKEN",
-            "hook_url": "http://127.0.0.1:18790/hooks/wake",
+            "hook_url": "http://127.0.0.1:18790/hook/agent",
             "allowed_urls": [
                 r"^https://api\.telegram\.org/bot[0-9]+:[A-Za-z0-9_-]+/",
             ],
             "max_body_size": 1048576,
+            "max_response_size": 1048576,
             "request_timeout": 30,
             "log_level": "INFO",
         }
@@ -72,6 +75,10 @@ class Config:
     @property
     def max_body_size(self) -> int:
         return self._config.get("max_body_size", 1048576)
+
+    @property
+    def max_response_size(self) -> int:
+        return self._config.get("max_response_size", 1048576)
 
     @property
     def request_timeout(self) -> int:

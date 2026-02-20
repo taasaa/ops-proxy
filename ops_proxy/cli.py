@@ -1,12 +1,15 @@
 """OpsProxy CLI - Main daemon entry point."""
 
 import argparse
+import fcntl
 import json
 import logging
 import os
 import signal
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,8 +18,20 @@ from ops_proxy.config import Config
 from ops_proxy.http_client import HTTPClient, Request, Response
 from ops_proxy.notifier import OpenClawNotifier
 from ops_proxy.rules import RulesEngine
-from ops_proxy.telegram import TelegramLongPoller
+from ops_proxy.telegram import TelegramLongPoller, send_message
 from ops_proxy.watcher import FileWatcher
+
+
+@contextmanager
+def file_lock(lock_file: Path):
+    """Context manager for file-based locking."""
+    lock_fd = open(lock_file, "w")
+    try:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+        lock_fd.close()
 
 
 logger = logging.getLogger(__name__)
@@ -59,40 +74,42 @@ class OpsProxyDaemon:
             return []
 
     def _save_responses(self, responses: dict) -> None:
-        """Save responses to responses.json."""
+        """Save responses to responses.json with file locking."""
         try:
-            # Load existing responses
-            existing = {}
-            if self.config.responses_file.exists():
-                with open(self.config.responses_file) as f:
-                    existing = json.load(f)
+            with file_lock(self.config.lock_file):
+                # Load existing responses
+                existing = {}
+                if self.config.responses_file.exists():
+                    with open(self.config.responses_file) as f:
+                        existing = json.load(f)
 
-            # Merge responses
-            if "responses" not in existing:
-                existing["responses"] = {}
-            existing["responses"].update(responses)
+                # Merge responses
+                if "responses" not in existing:
+                    existing["responses"] = {}
+                existing["responses"].update(responses)
 
-            # Save
-            with open(self.config.responses_file, "w") as f:
-                json.dump(existing, f, indent=2, default=str)
+                # Save
+                with open(self.config.responses_file, "w") as f:
+                    json.dump(existing, f, indent=2, default=str)
         except (json.JSONDecodeError, IOError) as e:
             logger.error(f"Error saving responses: {e}")
 
     def _update_request_status(self, request_id: str, status: str) -> None:
-        """Update request status in requests.json."""
+        """Update request status in requests.json with file locking."""
         try:
-            if not self.config.requests_file.exists():
-                return
-            with open(self.config.requests_file) as f:
-                data = json.load(f)
+            with file_lock(self.config.lock_file):
+                if not self.config.requests_file.exists():
+                    return
+                with open(self.config.requests_file) as f:
+                    data = json.load(f)
 
-            for req in data.get("requests", []):
-                if req.get("id") == request_id:
-                    req["status"] = status
-                    break
+                for req in data.get("requests", []):
+                    if req.get("id") == request_id:
+                        req["status"] = status
+                        break
 
-            with open(self.config.requests_file, "w") as f:
-                json.dump(data, f, indent=2)
+                with open(self.config.requests_file, "w") as f:
+                    json.dump(data, f, indent=2)
         except (json.JSONDecodeError, IOError) as e:
             logger.error(f"Error updating request status: {e}")
 
@@ -145,16 +162,20 @@ class OpsProxyDaemon:
         self._process_requests(requests)
 
     def _handle_telegram_message(self, messages: list[dict]) -> None:
-        """Handle incoming Telegram messages."""
+        """Handle incoming Telegram messages - wake OpenClaw to read from inbox."""
         if not messages:
             return
 
-        # Notify OpenClaw for each message
+        # For each new message, wake OpenClaw with inbox reference
         for msg in messages:
+            update_id = msg.get("update_id")
+            chat_id = msg.get("chat", {}).get("id") if msg.get("chat") else None
             text = msg.get("text", "")
-            if text and self.notifier.is_configured():
-                self.notifier.notify(text)
-            else:
+
+            if update_id and chat_id and self.notifier.is_configured():
+                # Tell agent to read from inbox - no mention of Telegram
+                self.notifier.notify_inbox(update_id, chat_id, text)
+            elif text:
                 logger.debug(f"Skipping notification for message: {text[:30]}...")
 
     def start(self) -> None:
@@ -164,7 +185,7 @@ class OpsProxyDaemon:
         logger.info(f"Data directory: {self.config.data_dir}")
         logger.info(f"Requests file: {self.config.requests_file}")
         logger.info(f"Responses file: {self.config.responses_file}")
-        logger.info(f"New messages file: {self.config.new_messages_file}")
+        logger.info(f"Inbox file: {self.config.inbox_file}")
 
         # Check for bot token
         if not self.config.bot_token:
@@ -178,8 +199,8 @@ class OpsProxyDaemon:
         if not self.config.responses_file.exists():
             with open(self.config.responses_file, "w") as f:
                 json.dump({"responses": {}}, f)
-        if not self.config.new_messages_file.exists():
-            with open(self.config.new_messages_file, "w") as f:
+        if not self.config.inbox_file.exists():
+            with open(self.config.inbox_file, "w") as f:
                 json.dump({"messages": []}, f)
 
         # Start file watcher for outgoing requests
@@ -193,7 +214,7 @@ class OpsProxyDaemon:
         if self.config.bot_token:
             self.poller = TelegramLongPoller(
                 bot_token=self.config.bot_token,
-                messages_file=self.config.new_messages_file,
+                messages_file=self.config.inbox_file,
                 timeout=30,
                 callback=self._handle_telegram_message,
             )
@@ -210,12 +231,25 @@ class OpsProxyDaemon:
 
         self._running = True
 
-        # Run loop
+        # Start Telegram poller in background thread
+        poller_thread: threading.Thread | None = None
+        if self.poller:
+            def poller_loop():
+                """Background thread for Telegram long polling."""
+                while self._running:
+                    try:
+                        self.poller.poll()
+                    except Exception as e:
+                        logger.error(f"Poller error: {e}")
+                        time.sleep(5)  # Backoff on error
+
+            poller_thread = threading.Thread(target=poller_loop, daemon=True)
+            poller_thread.start()
+            logger.info("Started Telegram poller in background thread")
+
+        # Run main loop (for watcher and other tasks)
         try:
             while self._running:
-                # Poll for new Telegram messages
-                if self.poller:
-                    self.poller.poll()
                 time.sleep(1)
         except KeyboardInterrupt:
             logger.info("Received interrupt signal")

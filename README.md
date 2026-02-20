@@ -17,13 +17,119 @@ OpenClaw (no network) ←→ OpsProxyDaemon ←→ Telegram API
 - **Communication**: Scratchpad files + OpenClaw hooks
 - **Security**: URL whitelist, token-based auth
 
-## Features
+### Inbox-Based Message Flow
 
-- Long-polling Telegram Bot API for incoming messages
-- OpenClaw hook notifications for instant message delivery
-- Outbound requests via scratchpad file
-- URL whitelist validation
-- Full audit logging
+```
+Telegram → Long Polling → inbox.json → /hook/wake → OpenClaw reads inbox
+                                                          ↓
+                                              writes requests.json
+                                                          ↓
+                                              OpsProxy executes → responses.json
+```
+
+1. **Telegram → Long Polling**: Daemon polls Telegram Bot API using long polling
+2. **inbox.json**: Telegram messages are stored in the inbox file
+3. **/hook/wake**: Daemon notifies OpenClaw via webhook to read the inbox
+4. **OpenClaw reads inbox**: Agent reads `~/.openclaw-ops/ops-proxy/inbox.json`
+5. **requests.json**: OpenClaw writes HTTP requests to execute
+6. **OpsProxy executes**: Daemon processes requests and writes responses to `responses.json`
+
+## Files
+
+### inbox.json
+
+Incoming Telegram messages. Written by the Telegram long poller.
+
+```json
+{
+  "messages": [
+    {
+      "update_id": 123456789,
+      "message": {
+        "message_id": 1,
+        "from": {"id": 123456, "is_bot": false, "first_name": "User"},
+        "chat": {"id": 123456, "type": "private"},
+        "date": 1700000000,
+        "text": "Hello"
+      }
+    }
+  ]
+}
+```
+
+### requests.json
+
+Outbound HTTP requests from OpenClaw. Read by the daemon.
+
+```json
+{
+  "requests": [
+    {
+      "id": "msg-1",
+      "method": "POST",
+      "url": "https://api.telegram.org/bot<token>/sendMessage",
+      "headers": {"Content-Type": "application/json"},
+      "body": {"chat_id": "123456", "text": "Hello!"},
+      "status": "pending"
+    }
+  ]
+}
+```
+
+**Simplified format** - use the `send` shorthand:
+
+```json
+{
+  "requests": [
+    {
+      "id": "msg-1",
+      "method": "POST",
+      "url": "",
+      "headers": {},
+      "body": {
+        "send": {
+          "chat_id": "123456",
+          "text": "Hello!"
+        }
+      },
+      "status": "pending"
+    }
+  ]
+}
+```
+
+### responses.json
+
+HTTP responses from executed requests. Written by the daemon.
+
+```json
+{
+  "responses": {
+    "msg-1": {
+      "status": 200,
+      "body": {"ok": true, "result": {"message_id": 1, "chat": {...}}},
+      "received_at": "2024-01-01T12:00:00Z",
+      "error": null
+    }
+  }
+}
+```
+
+## Configuration
+
+`~/.openclaw-ops/ops-proxy/config.yaml`:
+
+```yaml
+token_env: TG_BOT_TOKEN
+hook_url: http://127.0.0.1:18790/hooks/wake
+hook_token: your-hook-secret
+allowed_urls:
+  - "^https://api\\.telegram\\.org/bot[0-9]+:[A-Za-z0-9_-]+/.*"
+max_body_size: 1048576
+max_response_size: 1048576
+request_timeout: 30
+log_level: INFO
+```
 
 ## Quick Start
 
@@ -39,25 +145,6 @@ export HOOK_TOKEN="your-hook-secret"
 # Run
 ops-proxy start
 ```
-
-## Configuration
-
-`~/.openclaw-ops/ops-proxy/config.yaml`:
-
-```yaml
-token_env: TG_BOT_TOKEN
-hook_url: http://127.0.0.1:18790/hooks/wake
-allowed_urls:
-  - "^https://api\\.telegram\\.org/bot[0-9]+:[A-Za-z0-9_-]+/.*"
-```
-
-## Files
-
-- `ops_proxy/cli.py` - Main daemon
-- `ops_proxy/telegram.py` - Telegram API client
-- `ops_proxy/notifier.py` - OpenClaw hook notifier
-- `ops_proxy/rules.py` - URL validation
-- `ops_proxy/http_client.py` - HTTP client
 
 ## OpenClaw Configuration
 
@@ -92,14 +179,32 @@ Write to `~/.openclaw-ops/ops-proxy/requests.json`:
 }
 ```
 
+Or use the simplified `send` format:
+
+```json
+{
+  "requests": [{
+    "id": "msg-1",
+    "body": {
+      "send": {
+        "chat_id": "123456",
+        "text": "Hello!"
+      }
+    },
+    "status": "pending"
+  }]
+}
+```
+
 Response appears in `responses.json`.
 
 ### Inbound Messages (Telegram → OpenClaw)
 
 1. User messages Telegram bot
 2. Daemon receives via long-polling
-3. Daemon calls OpenClaw hook (`/hooks/wake`)
-4. OpenClaw queues as system event
+3. Daemon saves to `inbox.json`
+4. Daemon calls OpenClaw hook (`/hooks/wake`)
+5. OpenClaw reads `inbox.json` and processes messages
 
 ## Security
 

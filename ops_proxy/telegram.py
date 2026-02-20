@@ -60,7 +60,7 @@ class TelegramLongPoller:
         return 0
 
     def _save_messages(self, messages: list[dict[str, Any]]) -> None:
-        """Save messages to new_messages.json."""
+        """Save messages to inbox file."""
         try:
             # Ensure parent directory exists
             self.messages_file.parent.mkdir(parents=True, exist_ok=True)

@@ -47,7 +47,11 @@ class HTTPClient:
         if self._client is None:
             self._client = httpx.Client(
                 timeout=httpx.Timeout(self.config.request_timeout),
-                follow_redirects=True,
+                follow_redirects=False,  # Security: don't follow redirects automatically
+                limits=httpx.Limits(
+                    max_connections=10,
+                    max_keepalive_connections=5,
+                ),
             )
         return self._client
 
@@ -57,8 +61,60 @@ class HTTPClient:
             self._client.close()
             self._client = None
 
+    def _translate_send_format(self, request: Request) -> Request | None:
+        """Translate simple 'send' format to Telegram API call.
+
+        Agent writes:
+            { "send": { "chat_id": "...", "text": "..." } }
+
+        OpsProxy translates to Telegram API:
+            POST https://api.telegram.org/bot<token>/sendMessage
+            { "chat_id": "...", "text": "..." }
+
+        Returns None if not a 'send' format request.
+        """
+        if not request.body or "send" not in request.body:
+            return None
+
+        send_data = request.body.get("send")
+        if not isinstance(send_data, dict):
+            return None
+
+        chat_id = send_data.get("chat_id")
+        text = send_data.get("text")
+
+        if not chat_id or not text:
+            logger.warning(f"Request {request.id} missing chat_id or text in send format")
+            return None
+
+        # Build Telegram API URL
+        token = self.config.bot_token
+        if not token:
+            logger.warning(f"Request {request.id} no bot token configured")
+            return None
+
+        telegram_url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+        logger.info(f"Translating request {request.id} to Telegram API: send to {chat_id}")
+
+        return Request(
+            id=request.id,
+            method="POST",
+            url=telegram_url,
+            headers={"Content-Type": "application/json"},
+            body={"chat_id": str(chat_id), "text": str(text)},
+            created_at=request.created_at,
+            status="pending",
+        )
+
     def execute(self, request: Request) -> Response:
         """Execute an HTTP request after validation."""
+
+        # Check for simple 'send' format - translate to Telegram API
+        translated = self._translate_send_format(request)
+        if translated:
+            request = translated
+
         # Validate URL
         validation = self.rules.validate_url(request.url)
         if not validation.allowed:
@@ -100,6 +156,17 @@ class HTTPClient:
                 headers=request.headers,
                 json=request.body,
             )
+
+            # Check response size
+            content_length = response.headers.get("content-length")
+            if content_length and int(content_length) > self.config.max_response_size:
+                logger.warning(f"Response {request.id} too large: {content_length} bytes")
+                return Response(
+                    status=response.status_code,
+                    body=None,
+                    received_at=datetime.now(timezone.utc),
+                    error=f"Response size {content_length} exceeds limit {self.config.max_response_size}",
+                )
 
             logger.info(f"Response {request.id}: {response.status_code}")
             return Response(
