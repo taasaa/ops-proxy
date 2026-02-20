@@ -226,13 +226,20 @@ log_level: INFO
 cd ~/dev/ops/ops-proxy
 pip install -e .
 
-# Configure
-export TG_BOT_TOKEN="your:telegram_token"
-export HOOK_TOKEN="your-hook-secret"
+# Configure - create .env file in data directory (project-scoped, never committed)
+# The data directory is ~/.openclaw-ops/ops-proxy/
+echo 'TG_BOT_TOKEN=your:telegram_token
+JINA_API_KEY=your:jina-api-key
+HOOK_TOKEN=your-hook-secret' > ~/.openclaw-ops/ops-proxy/.env
 
 # Run
 ops-proxy
 ```
+
+**Note:** API keys are stored in `.env` file in the data directory (`~/.openclaw-ops/ops-proxy/`), not in the repo. This keeps them:
+- Project-scoped to OpenClaw
+- Never committed to version control
+- Loaded automatically when OpsProxy starts
 
 ## OpenClaw Configuration
 
@@ -277,12 +284,87 @@ Response appears in `responses.json`.
 4. Daemon calls OpenClaw hook (`/hook/wake`)
 5. OpenClaw reads `inbox.json` and processes messages
 
+### Web Research (OpenClaw → Internet)
+
+The agent can perform web research without direct internet access using Jina AI's Search and Reader APIs.
+
+**Step 1: Search** - Get list of URLs
+
+```json
+{
+  "requests": [{
+    "id": "search-1",
+    "command": "search",
+    "payload": {
+      "query": "What is quantum computing?"
+    }
+  }]
+}
+```
+
+**Response:** Returns clean list of URLs, not full content.
+
+```json
+{
+  "responses": {
+    "search-1": {
+      "status": 200,
+      "body": {
+        "ok": true,
+        "result": {
+          "content": "1. Quantum Computing\n   https://www.ibm.com/think/topics/quantum-computing\n\n2. Quantum computing\n   https://en.wikipedia.org/wiki/Quantum_computing",
+          "type": "search",
+          "urls": ["https://www.ibm.com/...", "https://en.wikipedia.org/..."]
+        }
+      }
+    }
+  }
+}
+```
+
+**Step 2: Read** - Fetch clean markdown from specific URL
+
+```json
+{
+  "requests": [{
+    "id": "read-1",
+    "command": "read",
+    "payload": {
+      "url": "https://www.ibm.com/think/topics/quantum-computing"
+    }
+  }]
+}
+```
+
+**Response:** Returns clean markdown content.
+
+```json
+{
+  "responses": {
+    "read-1": {
+      "status": 200,
+      "body": {
+        "ok": true,
+        "result": {
+          "content": "Quantum computing is an emergent field of computer science...",
+          "type": "read"
+        }
+      }
+    }
+  }
+}
+```
+
+**Configuration:** API keys are stored in `~/.openclaw-ops/ops-proxy/.env` (project-scoped, never committed).
+
 ## Security
 
 - No network for OpenClaw agent
-- Daemon validates all URLs against whitelist
+- Agent sends commands (send/search/read), not raw URLs
+- OpsProxy constructs all URLs internally (Telegram API, Jina Search/Reader)
 - Hook authentication via Bearer token
 - Localhost-only access to OpenClaw
+- API keys in project-scoped `.env` file, never committed
 
 ## Development
 

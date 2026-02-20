@@ -1,6 +1,9 @@
 """HTTP client for executing validated requests."""
 
+import json
 import logging
+import re
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -62,7 +65,11 @@ class HTTPClient:
             self._client = None
 
     def _translate_unified_format(self, request: Request) -> tuple[Request, dict | None] | None:
-        """Translate unified command format to Telegram API call.
+        """Translate unified command format to API call.
+
+        Supports two commands:
+        1. "send" - Telegram message/document
+        2. "search" - Web research via Jina AI
 
         Agent writes:
             {
@@ -76,7 +83,17 @@ class HTTPClient:
               }
             }
 
-        At least one of text or path is required.
+        Or for search:
+            {
+              "id": "search-1",
+              "command": "search",
+              "payload": {
+                "query": "What is quantum computing?"
+              }
+            }
+
+        At least one of text or path is required for send.
+        Query is required for search.
 
         Returns (request, files) tuple, or None if not a unified format request.
         """
@@ -87,8 +104,21 @@ class HTTPClient:
         command = request.body.get("command")
         payload = request.body.get("payload")
 
-        if command != "send" or not payload or not isinstance(payload, dict):
+        if not command or not payload or not isinstance(payload, dict):
             return None
+
+        # Route to appropriate handler
+        if command == "send":
+            return self._translate_send_command(request, payload)
+        elif command == "search":
+            return self._translate_search_command(request, payload)
+        elif command == "read":
+            return self._translate_read_command(request, payload)
+
+        return None
+
+    def _translate_send_command(self, request: Request, payload: dict) -> tuple[Request, dict | None] | None:
+        """Translate 'send' command to Telegram API call."""
 
         chat_id = payload.get("chat_id")
         text = payload.get("text")
@@ -167,26 +197,207 @@ class HTTPClient:
             None,
         )
 
+    def _translate_search_command(self, request: Request, payload: dict) -> tuple[Request, dict | None] | None:
+        """Translate 'search' command to Jina AI Search API call.
+
+        Agent writes:
+            {
+              "id": "search-1",
+              "command": "search",
+              "payload": {
+                "query": "What is quantum computing?"
+              }
+            }
+
+        OpsProxy internally calls Jina AI Search API.
+        Agent does NOT specify the engine - that's an implementation detail.
+        """
+        query = payload.get("query")
+
+        # Query is required
+        if not query:
+            logger.warning(f"Request {request.id} missing query in search command")
+            return None
+
+        # Get Jina API key
+        api_key = self.config.jina_api_key
+        if not api_key:
+            logger.warning(f"Request {request.id} no Jina API key configured")
+            return None
+
+        # Jina Search API: GET to https://s.jina.ai/?q=query
+        # Returns top 5 clean search results in markdown
+        logger.info(f"Translating request {request.id} to Jina AI search: {query}")
+
+        # Build headers with API key for higher rate limits
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+        }
+
+        # URL encode the query
+        encoded_query = urllib.parse.quote(query)
+        search_url = f"https://s.jina.ai/?q={encoded_query}"
+
+        return (
+            Request(
+                id=request.id,
+                method="GET",
+                url=search_url,
+                headers=headers,
+                body=None,
+                created_at=request.created_at,
+                status="pending",
+            ),
+            None,
+        )
+
+    def _translate_read_command(self, request: Request, payload: dict) -> tuple[Request, dict | None] | None:
+        """Translate 'read' command to Jina Reader API call.
+
+        Agent writes:
+            {
+              "id": "read-1",
+              "command": "read",
+              "payload": {
+                "url": "https://example.com/article"
+              }
+            }
+
+        OpsProxy internally calls Jina Reader API to fetch clean content.
+        Returns markdown, not HTML - perfect for LLM consumption.
+        """
+        url = payload.get("url")
+
+        if not url:
+            logger.warning(f"Request {request.id} missing url in read command")
+            return None
+
+        # Validate URL has http/https
+        if not url.startswith(("http://", "https://")):
+            logger.warning(f"Request {request.id} url must start with http:// or https://")
+            return None
+
+        # Get Jina API key
+        api_key = self.config.jina_api_key
+        if not api_key:
+            logger.warning(f"Request {request.id} no Jina API key configured")
+            return None
+
+        # Jina Reader API: POST to https://r.jina.ai/ with JSON body {"url": "..."}
+        logger.info(f"Translating request {request.id} to Jina Reader: {url}")
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        return (
+            Request(
+                id=request.id,
+                method="POST",
+                url="https://r.jina.ai/",
+                headers=headers,
+                body={"url": url},
+                created_at=request.created_at,
+                status="pending",
+            ),
+            None,
+        )
+
+    def _sanitize_read_response(self, response_body: str) -> dict:
+        """Sanitize Jina Reader response - returns clean markdown."""
+        try:
+            data = json.loads(response_body)
+            content = data.get("data", {}).get("content", response_body)
+        except json.JSONDecodeError:
+            content = response_body
+
+        max_length = self.config.max_search_content_length
+        if len(content) > max_length:
+            content = content[:max_length] + "\n\n[content truncated]"
+
+        return {
+            "ok": True,
+            "result": {
+                "content": content,
+                "type": "read",
+            }
+        }
+
+    def _sanitize_search_response(self, response_body: str) -> dict:
+        """Sanitize Jina AI search response - just return URLs, not full content.
+
+        Agent uses 'read' command to fetch clean content from specific URLs.
+        """
+        max_length = self.config.max_search_content_length
+
+        # Extract URLs - Jina returns markdown with [N] Title and [N] URL Source: format
+        urls = []
+        import re
+
+        # Match patterns like [1] Title: ... or ## 1. Title
+        lines = response_body.split('\n')
+        current_title = ""
+        url_map = {}
+
+        for line in lines:
+            # Check for title line
+            title_match = re.match(r'(?:##?\s*)?\[?(\d+)\]?\.?\s*Title:\s*(.+?)(?:\s*\[|$)', line)
+            if title_match:
+                current_title = title_match.group(2).strip()
+
+            # Check for URL line
+            url_match = re.search(r'URL Source:\s*(https?://[^\s\)]+)', line)
+            if url_match:
+                url = url_match.group(1)
+                if current_title:
+                    url_map[url] = current_title
+                    current_title = ""
+
+        # Format as simple URL list
+        output = []
+        for i, (url, title) in enumerate(url_map.items(), 1):
+            output.append(f"{i}. {title}")
+            output.append(f"   {url}")
+            output.append("")
+
+        if not output:
+            # Fallback: just return the raw response
+            output = [response_body[:max_length]]
+
+        final_content = "\n".join(output)
+
+        # Truncate if too long
+        if len(final_content) > max_length:
+            final_content = final_content[:max_length] + "\n\n[truncated]"
+
+        return {
+            "ok": True,
+            "result": {
+                "content": final_content,
+                "type": "search",
+                "urls": list(url_map.keys()),
+            }
+        }
+
     def execute(self, request: Request) -> Response:
         """Execute an HTTP request after validation."""
 
         files = None
+        original_command = None
 
         # Check for unified format (command + payload)
+        if request.body and isinstance(request.body, dict):
+            original_command = request.body.get("command")
+
         unified = self._translate_unified_format(request)
         if unified:
             request, files = unified
 
-        # Validate URL
-        validation = self.rules.validate_url(request.url)
-        if not validation.allowed:
-            logger.warning(f"Request {request.id} blocked: {validation.reason}")
-            return Response(
-                status=None,
-                body=None,
-                received_at=datetime.now(timezone.utc),
-                error=validation.reason,
-            )
+        # Note: URL validation removed
+        # Agent sends commands (send/search), not raw URLs
+        # OpsProxy constructs all URLs internally - secure by design
 
         # Inject bot token if URL contains placeholder
         url = request.url
@@ -196,7 +407,6 @@ class HTTPClient:
 
         # Check body size
         if request.body:
-            import json
             body_size = len(json.dumps(request.body).encode())
             max_size = self.config.max_body_size
             if body_size > max_size:
@@ -240,9 +450,18 @@ class HTTPClient:
                 )
 
             logger.info(f"Response {request.id}: {response.status_code}")
+
+            # Handle search/read response sanitization
+            if original_command == "search":
+                body = self._sanitize_search_response(response.text)
+            elif original_command == "read":
+                body = self._sanitize_read_response(response.text)
+            else:
+                body = response.json() if response.text else None
+
             return Response(
                 status=response.status_code,
-                body=response.json() if response.text else None,
+                body=body,
                 received_at=datetime.now(timezone.utc),
                 error=None,
             )

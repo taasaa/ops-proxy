@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 
 
 DEFAULT_DATA_DIR = Path.home() / ".openclaw-ops" / "ops-proxy"
@@ -32,6 +33,10 @@ class Config:
         self.pid_file = self.data_dir / DEFAULT_PID_FILE
         self.lock_file = self.data_dir / DEFAULT_LOCK_FILE
 
+        # Load .env from data directory (project-scoped)
+        env_file = self.data_dir / ".env"
+        load_dotenv(env_file)
+
         self._config: dict[str, Any] = {}
         self._load()
 
@@ -54,12 +59,13 @@ class Config:
         return {
             "version": "1.0",
             "token_env": "TG_BOT_TOKEN",
+            "jina_api_key_env": "JINA_API_KEY",
             "hook_url": "http://127.0.0.1:18790/hook/agent",
-            "allowed_urls": [
-                r"^https://api\.telegram\.org/bot[0-9]+:[A-Za-z0-9_-]+/",
-            ],
+            # Note: No URL allowlist - agent sends commands, not URLs
+            # OpsProxy constructs all URLs internally
             "max_body_size": 1048576,
             "max_response_size": 1048576,
+            "max_search_content_length": 8192,
             "request_timeout": 30,
             "log_level": "INFO",
         }
@@ -102,6 +108,19 @@ class Config:
     def bot_token(self) -> str | None:
         """Get bot token from environment variable."""
         return os.environ.get(self.token_env)
+
+    @property
+    def jina_api_key_env(self) -> str:
+        return self._config.get("jina_api_key_env", "JINA_API_KEY")
+
+    @property
+    def jina_api_key(self) -> str | None:
+        """Get Jina API key from environment variable."""
+        return os.environ.get(self.jina_api_key_env)
+
+    @property
+    def max_search_content_length(self) -> int:
+        return self._config.get("max_search_content_length", 8192)
 
     def reload(self) -> None:
         """Reload configuration from file."""

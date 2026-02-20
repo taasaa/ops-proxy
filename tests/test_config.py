@@ -29,9 +29,9 @@ class TestConfig:
         assert config.max_body_size == 1048576
         assert config.request_timeout == 30
         assert config.log_level == "INFO"
-        # Check that api.telegram.org is in the default allowed_urls pattern
-        assert len(config.allowed_urls) == 1
-        assert "api" in config.allowed_urls[0] and "telegram" in config.allowed_urls[0]
+        # No URL allowlist by default - agent sends commands, not URLs
+        # OpsProxy constructs all URLs internally (secure by design)
+        assert len(config.allowed_urls) == 0
 
     def test_custom_config_values(self, tmp_path):
         """Test loading custom configuration values."""

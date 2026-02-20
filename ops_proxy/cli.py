@@ -193,6 +193,10 @@ class OpsProxyDaemon:
         if not self.config.bot_token:
             logger.warning("TG_BOT_TOKEN not set in environment")
 
+        # Check for Jina API key (for search)
+        if not self.config.jina_api_key:
+            logger.warning("JINA_API_KEY not set in environment - search will not work")
+
         # Ensure files exist
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
         if not self.config.requests_file.exists():

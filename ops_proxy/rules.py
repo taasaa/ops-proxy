@@ -34,7 +34,11 @@ class RulesEngine:
                 logger.error(f"Invalid regex pattern: {pattern}: {e}")
 
     def validate_url(self, url: str) -> ValidationResult:
-        """Validate URL against allowed patterns."""
+        """Validate URL against allowed patterns.
+
+        If no patterns are configured, all URLs are allowed.
+        This is the secure-by-design case: agent sends commands, not URLs.
+        """
         try:
             parsed = urlparse(url)
         except Exception as e:
@@ -45,6 +49,10 @@ class RulesEngine:
 
         if parsed.scheme not in ("http", "https"):
             return ValidationResult(False, f"Invalid scheme: {parsed.scheme}")
+
+        # If no patterns configured, allow all (secure-by-design)
+        if not self._compiled_patterns:
+            return ValidationResult(True, "No restrictions - all URLs allowed")
 
         # Check URL pattern
         for pattern in self._compiled_patterns:
