@@ -13,6 +13,7 @@ from pathlib import Path
 from ops_proxy import __version__
 from ops_proxy.config import Config
 from ops_proxy.http_client import HTTPClient, Request, Response
+from ops_proxy.notifier import OpenClawNotifier
 from ops_proxy.rules import RulesEngine
 from ops_proxy.telegram import TelegramLongPoller
 from ops_proxy.watcher import FileWatcher
@@ -28,6 +29,7 @@ class OpsProxyDaemon:
         self.config = Config(data_dir)
         self.rules = RulesEngine(self.config)
         self.http_client = HTTPClient(self.config, self.rules)
+        self.notifier = OpenClawNotifier(self.config.hook_url, self.config.hook_token)
         self.watcher: FileWatcher | None = None
         self.poller: TelegramLongPoller | None = None
         self._running = False
@@ -142,6 +144,19 @@ class OpsProxyDaemon:
             return
         self._process_requests(requests)
 
+    def _handle_telegram_message(self, messages: list[dict]) -> None:
+        """Handle incoming Telegram messages."""
+        if not messages:
+            return
+
+        # Notify OpenClaw for each message
+        for msg in messages:
+            text = msg.get("text", "")
+            if text and self.notifier.is_configured():
+                self.notifier.notify(text)
+            else:
+                logger.debug(f"Skipping notification for message: {text[:30]}...")
+
     def start(self) -> None:
         """Start the daemon."""
         self._setup_logging()
@@ -180,11 +195,18 @@ class OpsProxyDaemon:
                 bot_token=self.config.bot_token,
                 messages_file=self.config.new_messages_file,
                 timeout=30,
+                callback=self._handle_telegram_message,
             )
             self.poller.start()
             logger.info("Started Telegram long polling")
         else:
             logger.warning("No bot token - long polling disabled")
+
+        # Log hook configuration
+        if self.notifier.is_configured():
+            logger.info(f"OpenClaw hook notifications enabled: {self.config.hook_url}")
+        else:
+            logger.warning("OpenClaw hook not configured - notifications disabled")
 
         self._running = True
 
@@ -209,6 +231,7 @@ class OpsProxyDaemon:
         if self.poller:
             self.poller.stop()
             self.poller.close()
+        self.notifier.close()
         self.http_client.close()
 
 

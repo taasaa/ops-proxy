@@ -52,6 +52,7 @@ class Config:
         return {
             "version": "1.0",
             "token_env": "TG_BOT_TOKEN",
+            "hook_url": "http://127.0.0.1:18790/hooks/wake",
             "allowed_urls": [
                 r"^https://api\.telegram\.org/bot[0-9]+:[A-Za-z0-9_-]+/",
             ],
@@ -79,6 +80,16 @@ class Config:
     @property
     def log_level(self) -> str:
         return self._config.get("log_level", "INFO")
+
+    @property
+    def hook_url(self) -> str | None:
+        """Get OpenClaw hook URL from config or environment."""
+        return self._config.get("hook_url") or os.environ.get("HOOK_URL")
+
+    @property
+    def hook_token(self) -> str | None:
+        """Get OpenClaw hook token from config or environment."""
+        return self._config.get("hook_token") or os.environ.get("HOOK_TOKEN")
 
     @property
     def bot_token(self) -> str | None:
