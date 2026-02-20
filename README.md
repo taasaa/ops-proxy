@@ -1,196 +1,119 @@
-# ops-proxy
+# OpsProxy
 
-OpsProxy is a daemon for controlled network access. It validates HTTP requests against allowed URL patterns and executes them on behalf of other processes.
+Local proxy daemon that gives OpenClaw controlled access to Telegram Bot API.
+
+## Purpose
+
+OpenClaw runs with `network: "none"` (security model). This daemon provides controlled outbound access while maintaining security:
+
+```
+OpenClaw (no network) ←→ OpsProxyDaemon ←→ Telegram API
+                      (localhost only)
+```
+
+## Architecture
+
+- **Daemon**: Python, runs outside OpenClaw sandbox
+- **Communication**: Scratchpad files + OpenClaw hooks
+- **Security**: URL whitelist, token-based auth
 
 ## Features
 
-- URL allowlist validation using regex patterns
-- Request/response handling via JSON files
-- File-based API (scratchpad format)
-- Automatic request processing via file watcher
-- Configurable via YAML
+- Long-polling Telegram Bot API for incoming messages
+- OpenClaw hook notifications for instant message delivery
+- Outbound requests via scratchpad file
+- URL whitelist validation
+- Full audit logging
 
-## Installation
+## Quick Start
 
 ```bash
+# Install
 cd ~/dev/ops/ops-proxy
 pip install -e .
-```
 
-Or with dev dependencies:
+# Configure
+export TG_BOT_TOKEN="your:telegram_token"
+export HOOK_TOKEN="your-hook-secret"
 
-```bash
-pip install -e ".[dev]"
+# Run
+ops-proxy start
 ```
 
 ## Configuration
 
-The default data directory is `~/.openclaw-ops/ops-proxy/`.
-
-### Default Configuration
+`~/.openclaw-ops/ops-proxy/config.yaml`:
 
 ```yaml
-version: "1.0"
 token_env: TG_BOT_TOKEN
+hook_url: http://127.0.0.1:18790/hooks/wake
 allowed_urls:
-  - ^https://api\.telegram\.org/bot[0-9]+:[A-Za-z0-9_-]+/
-max_body_size: 1048576
-request_timeout: 30
-log_level: INFO
+  - "^https://api\\.telegram\\.org/bot[0-9]+:[A-Za-z0-9_-]+/.*"
 ```
 
-### Configuration Options
+## Files
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `token_env` | Environment variable name for bot token | `TG_BOT_TOKEN` |
-| `allowed_urls` | List of regex patterns for allowed URLs | Telegram API only |
-| `max_body_size` | Maximum request body size in bytes | 1048576 (1MB) |
-| `request_timeout` | HTTP request timeout in seconds | 30 |
-| `log_level` | Logging level | INFO |
+- `ops_proxy/cli.py` - Main daemon
+- `ops_proxy/telegram.py` - Telegram API client
+- `ops_proxy/notifier.py` - OpenClaw hook notifier
+- `ops_proxy/rules.py` - URL validation
+- `ops_proxy/http_client.py` - HTTP client
 
-## API / Scratchpad Format
+## OpenClaw Configuration
 
-OpsProxy uses JSON files for request/response communication.
-
-### requests.json
-
-Add pending requests to `~/.openclaw-ops/ops-proxy/requests.json`:
+Enable hooks in `~/.openclaw-ops/openclaw.json`:
 
 ```json
 {
-  "requests": [
-    {
-      "id": "request-1",
-      "method": "POST",
-      "url": "https://api.telegram.org/bot<token>/sendMessage",
-      "headers": {
-        "Content-Type": "application/json"
-      },
-      "body": {
-        "chat_id": 123456789,
-        "text": "Hello from ops-proxy!"
-      },
-      "status": "pending"
-    }
-  ]
-}
-```
-
-#### Request Fields
-
-| Field | Description | Required |
-|-------|-------------|----------|
-| `id` | Unique request identifier | Yes |
-| `method` | HTTP method (GET, POST, etc.) | No, defaults to POST |
-| `url` | Target URL (use `<token>` placeholder for bot token) | Yes |
-| `headers` | HTTP headers | No |
-| `body` | Request body (JSON object) | No |
-| `status` | Request status (pending, completed, failed) | No, defaults to pending |
-
-### responses.json
-
-Responses are written to `~/.openclaw-ops/ops-proxy/responses.json`:
-
-```json
-{
-  "responses": {
-    "request-1": {
-      "status": 200,
-      "body": {
-        "ok": true,
-        "result": {
-          "message_id": 123,
-          "chat": { "id": 123456789 },
-          "text": "Hello from ops-proxy!"
-        }
-      },
-      "received_at": "2024-01-15T10:30:00+00:00",
-      "error": null
-    }
+  "hooks": {
+    "enabled": true,
+    "token": "your-hook-secret",
+    "path": "/hooks"
   }
 }
 ```
 
-## Running as a Daemon
+## Usage
 
-### Basic Usage
+### Outbound Messages (OpenClaw → Telegram)
 
-```bash
-ops-proxy
+Write to `~/.openclaw-ops/ops-proxy/requests.json`:
+
+```json
+{
+  "requests": [{
+    "id": "msg-1",
+    "method": "POST",
+    "url": "https://api.telegram.org/bot<token>/sendMessage",
+    "headers": {"Content-Type": "application/json"},
+    "body": {"chat_id": "123456", "text": "Hello!"},
+    "status": "pending"
+  }]
+}
 ```
 
-### Options
+Response appears in `responses.json`.
 
-```bash
-ops-proxy --help
-```
+### Inbound Messages (Telegram → OpenClaw)
 
-Options:
-- `--version`: Show version
-- `--data-dir PATH`: Custom data directory (default: ~/.openclaw-ops/ops-proxy/)
-- `--foreground`: Run in foreground (don't daemonize)
+1. User messages Telegram bot
+2. Daemon receives via long-polling
+3. Daemon calls OpenClaw hook (`/hooks/wake`)
+4. OpenClaw queues as system event
 
-### Systemd Service (macOS launchd)
+## Security
 
-The project includes a launchd plist file (`com.openclaw.ops-proxy.plist`) for running as a service on macOS.
-
-1. Copy the plist file:
-   ```bash
-   cp com.openclaw.ops-proxy.plist ~/Library/LaunchAgents/
-   ```
-
-2. Edit the plist to set your environment variables and paths
-
-3. Load the service:
-   ```bash
-   launchctl load ~/Library/LaunchAgents/com.openclaw.ops-proxy.plist
-   ```
-
-4. Start the service:
-   ```bash
-   launchctl start com.openclaw.ops-proxy
-   ```
-
-### Setting the Bot Token
-
-Set the bot token environment variable before starting:
-
-```bash
-export TG_BOT_TOKEN="your-bot-token-here"
-ops-proxy
-```
-
-Or add it to your shell profile (~/.zshrc):
-
-```bash
-export TG_BOT_TOKEN="your-bot-token-here"
-```
+- No network for OpenClaw agent
+- Daemon validates all URLs against whitelist
+- Hook authentication via Bearer token
+- Localhost-only access to OpenClaw
 
 ## Development
 
-### Running Tests
-
 ```bash
-pytest tests/ -v
+# Test
+python -m pytest tests/
+
+# Run in debug mode
+python -m ops_proxy.cli --debug
 ```
-
-### Project Structure
-
-```
-ops-proxy/
-├── ops_proxy/
-│   ├── __init__.py      # Version info
-│   ├── cli.py           # Main daemon entry point
-│   ├── config.py        # Configuration loader
-│   ├── http_client.py   # HTTP client with validation
-│   ├── rules.py         # URL validation rules
-│   └── watcher.py       # File watcher for requests
-├── tests/               # Test suite
-├── pyproject.toml       # Project configuration
-└── com.openclaw.ops-proxy.plist  # launchd plist
-```
-
-## License
-
-Proprietary - All rights reserved
