@@ -17,7 +17,7 @@ OpenClaw (no network) ←→ OpsProxyDaemon ←→ Telegram API
 - **Communication**: Scratchpad files + OpenClaw hooks
 - **Security**: URL whitelist, token-based auth
 
-### Inbox-Based Message Flow
+### Message Flow
 
 ```
 Telegram → Long Polling → inbox.json → /hook/wake → OpenClaw reads inbox
@@ -59,40 +59,21 @@ Incoming Telegram messages. Written by the Telegram long poller.
 
 ### requests.json
 
-Outbound HTTP requests from OpenClaw. Read by the daemon.
+Outbound requests from OpenClaw. Read by the daemon.
+
+**Unified format (supported):**
 
 ```json
 {
   "requests": [
     {
       "id": "msg-1",
-      "method": "POST",
-      "url": "https://api.telegram.org/bot<token>/sendMessage",
-      "headers": {"Content-Type": "application/json"},
-      "body": {"chat_id": "123456", "text": "Hello!"},
-      "status": "pending"
-    }
-  ]
-}
-```
-
-**Simplified format** - use the `send` shorthand:
-
-```json
-{
-  "requests": [
-    {
-      "id": "msg-1",
-      "method": "POST",
-      "url": "",
-      "headers": {},
-      "body": {
-        "send": {
-          "chat_id": "123456",
-          "text": "Hello!"
-        }
-      },
-      "status": "pending"
+      "command": "send",
+      "status": "pending",
+      "payload": {
+        "chat_id": "123456",
+        "text": "Hello!"
+      }
     }
   ]
 }
@@ -115,13 +96,107 @@ HTTP responses from executed requests. Written by the daemon.
 }
 ```
 
+## Unified Request Format
+
+The unified format uses `command` and `payload` keys:
+
+```json
+{
+  "id": "unique-request-id",
+  "command": "send",
+  "status": "pending",
+  "payload": {
+    "chat_id": "123456789",
+    "text": "Message text",
+    "path": "/path/to/file.pdf",
+    "format": "markdown"
+  }
+}
+```
+
+### Payload Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `chat_id` | string | Yes | Telegram chat ID |
+| `text` | string | No* | Message text (required if path not provided) |
+| `path` | string | No* | File path to upload (required if text not provided) |
+| `format` | string | No | Parse mode: `markdown`, `html`, or `plain` (default: `plain`) |
+
+*At least one of `text` or `path` is required.
+
+### Examples
+
+**Send a text message:**
+
+```json
+{
+  "requests": [{
+    "id": "msg-1",
+    "command": "send",
+    "payload": {
+      "chat_id": "123456789",
+      "text": "Hello, world!"
+    }
+  }]
+}
+```
+
+**Send with Markdown formatting:**
+
+```json
+{
+  "requests": [{
+    "id": "msg-2",
+    "command": "send",
+    "payload": {
+      "chat_id": "123456789",
+      "text": "Hello *bold* and _italic_!",
+      "format": "markdown"
+    }
+  }]
+}
+```
+
+**Send with HTML formatting:**
+
+```json
+{
+  "requests": [{
+    "id": "msg-3",
+    "command": "send",
+    "payload": {
+      "chat_id": "123456789",
+      "text": "Hello <b>bold</b> and <i>italic</i>!",
+      "format": "html"
+    }
+  }]
+}
+```
+
+**Upload a document with caption:**
+
+```json
+{
+  "requests": [{
+    "id": "doc-1",
+    "command": "send",
+    "payload": {
+      "chat_id": "123456789",
+      "text": "Here is the document you requested",
+      "path": "/home/user/document.pdf"
+    }
+  }]
+}
+```
+
 ## Configuration
 
 `~/.openclaw-ops/ops-proxy/config.yaml`:
 
 ```yaml
 token_env: TG_BOT_TOKEN
-hook_url: http://127.0.0.1:18790/hooks/wake
+hook_url: http://127.0.0.1:18790/hook/agent
 hook_token: your-hook-secret
 allowed_urls:
   - "^https://api\\.telegram\\.org/bot[0-9]+:[A-Za-z0-9_-]+/.*"
@@ -130,6 +205,19 @@ max_response_size: 1048576
 request_timeout: 30
 log_level: INFO
 ```
+
+### Configuration Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `token_env` | `TG_BOT_TOKEN` | Environment variable for Telegram bot token |
+| `hook_url` | `http://127.0.0.1:18790/hook/agent` | OpenClaw hook URL |
+| `hook_token` | - | Token for hook authentication |
+| `allowed_urls` | Telegram API pattern | List of allowed URL regex patterns |
+| `max_body_size` | 1048576 (1MB) | Maximum request body size |
+| `max_response_size` | 1048576 (1MB) | Maximum response size |
+| `request_timeout` | 30 | HTTP request timeout in seconds |
+| `log_level` | INFO | Logging level |
 
 ## Quick Start
 
@@ -143,7 +231,7 @@ export TG_BOT_TOKEN="your:telegram_token"
 export HOOK_TOKEN="your-hook-secret"
 
 # Run
-ops-proxy start
+ops-proxy
 ```
 
 ## OpenClaw Configuration
@@ -170,28 +258,11 @@ Write to `~/.openclaw-ops/ops-proxy/requests.json`:
 {
   "requests": [{
     "id": "msg-1",
-    "method": "POST",
-    "url": "https://api.telegram.org/bot<token>/sendMessage",
-    "headers": {"Content-Type": "application/json"},
-    "body": {"chat_id": "123456", "text": "Hello!"},
-    "status": "pending"
-  }]
-}
-```
-
-Or use the simplified `send` format:
-
-```json
-{
-  "requests": [{
-    "id": "msg-1",
-    "body": {
-      "send": {
-        "chat_id": "123456",
-        "text": "Hello!"
-      }
-    },
-    "status": "pending"
+    "command": "send",
+    "payload": {
+      "chat_id": "123456789",
+      "text": "Hello from OpenClaw!"
+    }
   }]
 }
 ```
@@ -203,7 +274,7 @@ Response appears in `responses.json`.
 1. User messages Telegram bot
 2. Daemon receives via long-polling
 3. Daemon saves to `inbox.json`
-4. Daemon calls OpenClaw hook (`/hooks/wake`)
+4. Daemon calls OpenClaw hook (`/hook/wake`)
 5. OpenClaw reads `inbox.json` and processes messages
 
 ## Security
@@ -219,6 +290,6 @@ Response appears in `responses.json`.
 # Test
 python -m pytest tests/
 
-# Run in debug mode
-python -m ops_proxy.cli --debug
+# Run in foreground
+python -m ops_proxy.cli --foreground
 ```

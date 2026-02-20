@@ -137,3 +137,105 @@ class TestConfigFiles:
         assert config.responses_file.name == "responses.json"
         assert config.log_file.name == "ops-proxy.log"
         assert config.pid_file.name == "ops-proxy.pid"
+        assert config.lock_file.name == "ops-proxy.lock"
+        assert config.inbox_file.name == "inbox.json"
+
+
+class TestConfigHookSettings:
+    """Tests for hook URL and token configuration."""
+
+    def test_hook_url_from_config(self, tmp_path):
+        """Test getting hook URL from config file."""
+        import yaml
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        config_file = data_dir / "config.yaml"
+
+        config_data = {
+            "hook_url": "http://localhost:18790/hook/agent",
+            "hook_token": "secret_token_123",
+        }
+        with open(config_file, "w") as f:
+            yaml.safe_dump(config_data, f)
+
+        config = Config(tmp_path / "data")
+
+        assert config.hook_url == "http://localhost:18790/hook/agent"
+        assert config.hook_token == "secret_token_123"
+
+    def test_hook_url_from_env(self, tmp_path):
+        """Test getting hook URL from environment variable."""
+        import yaml
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        config_file = data_dir / "config.yaml"
+
+        # Write minimal config (no hook settings)
+        with open(config_file, "w") as f:
+            yaml.safe_dump({}, f)
+
+        # Set environment variables
+        os.environ["HOOK_URL"] = "http://custom:9999/hook/agent"
+        os.environ["HOOK_TOKEN"] = "env_token"
+
+        try:
+            config = Config(tmp_path / "data")
+
+            # Environment should override
+            assert config.hook_url == "http://custom:9999/hook/agent"
+            assert config.hook_token == "env_token"
+        finally:
+            del os.environ["HOOK_URL"]
+            del os.environ["HOOK_TOKEN"]
+
+    def test_hook_url_none_when_not_configured(self, tmp_path):
+        """Test hook_url returns None when not configured."""
+        import yaml
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        config_file = data_dir / "config.yaml"
+
+        # Make sure env vars are not set
+        if "HOOK_URL" in os.environ:
+            del os.environ["HOOK_URL"]
+        if "HOOK_TOKEN" in os.environ:
+            del os.environ["HOOK_TOKEN"]
+
+        with open(config_file, "w") as f:
+            yaml.safe_dump({}, f)
+
+        config = Config(tmp_path / "data")
+
+        assert config.hook_url is None
+        assert config.hook_token is None
+
+
+class TestConfigMaxResponseSize:
+    """Tests for max_response_size configuration."""
+
+    def test_default_max_response_size(self, tmp_path):
+        """Test default max_response_size value."""
+        config = Config(tmp_path / "data")
+
+        assert config.max_response_size == 1048576
+
+    def test_custom_max_response_size(self, tmp_path):
+        """Test custom max_response_size value."""
+        import yaml
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        config_file = data_dir / "config.yaml"
+
+        config_data = {
+            "max_response_size": 2097152,
+        }
+        with open(config_file, "w") as f:
+            yaml.safe_dump(config_data, f)
+
+        config = Config(tmp_path / "data")
+
+        assert config.max_response_size == 2097152

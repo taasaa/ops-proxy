@@ -61,59 +61,121 @@ class HTTPClient:
             self._client.close()
             self._client = None
 
-    def _translate_send_format(self, request: Request) -> Request | None:
-        """Translate simple 'send' format to Telegram API call.
+    def _translate_unified_format(self, request: Request) -> tuple[Request, dict | None] | None:
+        """Translate unified command format to Telegram API call.
 
         Agent writes:
-            { "send": { "chat_id": "...", "text": "..." } }
+            {
+              "id": "req-1",
+              "command": "send",
+              "payload": {
+                "chat_id": "...",
+                "text": "Hello world",      // optional
+                "path": "/path/to/file",    // optional
+                "format": "markdown"       // optional: markdown | html | plain
+              }
+            }
 
-        OpsProxy translates to Telegram API:
-            POST https://api.telegram.org/bot<token>/sendMessage
-            { "chat_id": "...", "text": "..." }
+        At least one of text or path is required.
 
-        Returns None if not a 'send' format request.
+        Returns (request, files) tuple, or None if not a unified format request.
         """
-        if not request.body or "send" not in request.body:
+        if not request.body or not isinstance(request.body, dict):
             return None
 
-        send_data = request.body.get("send")
-        if not isinstance(send_data, dict):
+        # Check for unified format: has command and payload
+        command = request.body.get("command")
+        payload = request.body.get("payload")
+
+        if command != "send" or not payload or not isinstance(payload, dict):
             return None
 
-        chat_id = send_data.get("chat_id")
-        text = send_data.get("text")
+        chat_id = payload.get("chat_id")
+        text = payload.get("text")
+        file_path = payload.get("path")
+        format_type = payload.get("format", "plain")
 
-        if not chat_id or not text:
-            logger.warning(f"Request {request.id} missing chat_id or text in send format")
+        # At least one of text or path required
+        if not chat_id or (not text and not file_path):
+            logger.warning(f"Request {request.id} missing chat_id, text, or path in unified format")
             return None
 
-        # Build Telegram API URL
+        # Get bot token
         token = self.config.bot_token
         if not token:
             logger.warning(f"Request {request.id} no bot token configured")
             return None
 
-        telegram_url = f"https://api.telegram.org/bot{token}/sendMessage"
+        files = None
 
-        logger.info(f"Translating request {request.id} to Telegram API: send to {chat_id}")
+        # Handle file upload
+        if file_path:
+            from pathlib import Path
+            path = Path(file_path).expanduser().resolve()
 
-        return Request(
-            id=request.id,
-            method="POST",
-            url=telegram_url,
-            headers={"Content-Type": "application/json"},
-            body={"chat_id": str(chat_id), "text": str(text)},
-            created_at=request.created_at,
-            status="pending",
+            if not path.exists():
+                logger.warning(f"Request {request.id}: file not found: {path}")
+                return None
+
+            try:
+                file_content = path.read_bytes()
+            except IOError as e:
+                logger.warning(f"Request {request.id}: cannot read file {path}: {e}")
+                return None
+
+            logger.info(f"Translating request {request.id} to Telegram sendDocument: {path.name} to {chat_id}")
+
+            # Build body for document
+            body = {"chat_id": str(chat_id)}
+            if text:
+                body["caption"] = str(text)
+            if format_type != "plain":
+                body["parse_mode"] = format_type.capitalize()
+
+            files = {"document": (path.name, file_content)}
+
+            return (
+                Request(
+                    id=request.id,
+                    method="POST",
+                    url=f"https://api.telegram.org/bot{token}/sendDocument",
+                    headers={},
+                    body=body,
+                    created_at=request.created_at,
+                    status="pending",
+                ),
+                files,
+            )
+
+        # Handle text message
+        logger.info(f"Translating request {request.id} to Telegram sendMessage: {chat_id}")
+
+        body = {"chat_id": str(chat_id), "text": str(text)}
+        if format_type != "plain":
+            body["parse_mode"] = format_type.capitalize()
+
+        return (
+            Request(
+                id=request.id,
+                method="POST",
+                url=f"https://api.telegram.org/bot{token}/sendMessage",
+                headers={"Content-Type": "application/json"},
+                body=body,
+                created_at=request.created_at,
+                status="pending",
+            ),
+            None,
         )
 
     def execute(self, request: Request) -> Response:
         """Execute an HTTP request after validation."""
 
-        # Check for simple 'send' format - translate to Telegram API
-        translated = self._translate_send_format(request)
-        if translated:
-            request = translated
+        files = None
+
+        # Check for unified format (command + payload)
+        unified = self._translate_unified_format(request)
+        if unified:
+            request, files = unified
 
         # Validate URL
         validation = self.rules.validate_url(request.url)
@@ -150,12 +212,21 @@ class HTTPClient:
             logger.info(f"Executing request {request.id}: {request.method} {url}")
             client = self._get_client()
 
-            response = client.request(
-                method=request.method,
-                url=url,
-                headers=request.headers,
-                json=request.body,
-            )
+            # Handle multipart file upload for documents
+            if files:
+                response = client.request(
+                    method=request.method,
+                    url=url,
+                    files=files,
+                    data=request.body,
+                )
+            else:
+                response = client.request(
+                    method=request.method,
+                    url=url,
+                    headers=request.headers,
+                    json=request.body,
+                )
 
             # Check response size
             content_length = response.headers.get("content-length")

@@ -124,13 +124,15 @@ class OpsProxyDaemon:
 
             logger.info(f"Processing request {request_id}")
 
-            # Parse request
+            # Parse request - unified format: { id, command, payload, ... }
+            body = req
+
             http_request = Request(
                 id=request_id,
                 method=req.get("method", "POST"),
                 url=req.get("url", ""),
                 headers=req.get("headers", {}),
-                body=req.get("body"),
+                body=body,
                 created_at=datetime.now(timezone.utc),
                 status="pending",
             )
